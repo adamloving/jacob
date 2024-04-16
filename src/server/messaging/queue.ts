@@ -33,8 +33,13 @@ import {
 import { createRepoInstalledIssue } from "../github/issue";
 import { getFile } from "../github/repo";
 import { posthogClient } from "../analytics/posthog";
+import { Language } from "../utils/settings";
+import { AsyncLocalStorage } from "async_hooks";
+const asyncLocalStorage = new AsyncLocalStorage();
 
-const QUEUE_NAME = "github_event_queue";
+const GITHUB_EVENT_QUEUE_NAME = "github_event_queue";
+const INTERNAL_EVENT_BROADCAST_QUEUE_NAME =
+  process.env.INTERNAL_EVENT_BROADCAST_QUEUE_NAME ?? null;
 
 const auth = createAppAuth({
   appId: process.env.GITHUB_APP_ID ?? "",
@@ -53,14 +58,26 @@ async function initRabbitMQ() {
 
     // Init queue with one hour consumer timeout to ensure
     // we have enough time to install, build, and test
-    await channel.assertQueue(QUEUE_NAME, {
+    await channel.assertQueue(GITHUB_EVENT_QUEUE_NAME, {
       durable: true,
       arguments: { "x-consumer-timeout": 60 * 60 * 1000 },
     });
 
+    // Queue to broadcast internal events to the web portal
+    // This queue is optional and can be disabled by setting the queue name to an empty string in the .env file
+    if (INTERNAL_EVENT_BROADCAST_QUEUE_NAME) {
+      await channel.assertQueue(INTERNAL_EVENT_BROADCAST_QUEUE_NAME, {
+        durable: true,
+      });
+    } else {
+      console.log(
+        "Warning: Internal event broadcast queue not initialized. If this was not intended, please check the .env file.",
+      );
+    }
+
     channel.prefetch(1);
     channel.consume(
-      QUEUE_NAME,
+      GITHUB_EVENT_QUEUE_NAME,
       async (message) => {
         if (!message) {
           console.error(`null message received from channel.consume()!`);
@@ -342,187 +359,232 @@ export async function onGitHubEvent(event: WebhookQueuedEvent) {
       existingPr = result.data;
       prBranch = existingPr.head.ref;
     }
-
-    try {
-      const { path, cleanup } = await cloneRepo(
-        repository.full_name,
-        prBranch,
-        installationAuthentication.token,
-      );
-
-      console.log(`[${repository.full_name}] repo cloned to ${path}`);
-
-      const repoSettings = getRepoSettings(path);
-
+    const internalEventMetadata: InternalEventMetadata = {
+      repo: repository.full_name,
+      issueId: eventIssueOrPRNumber,
+      userId: distinctId,
+    };
+    // save the internal event metadata to asyncLocalStorage
+    await asyncLocalStorage.run(internalEventMetadata, async () => {
       try {
-        if (issueOpened) {
-          // Ensure that we capture a source map BEFORE we run the build check.
-          // Once npm install has been run, the source map becomes much more
-          // detailed and is too large for our LLM context window.
-          const sourceMap = getSourceMap(path, repoSettings);
-          await runBuildCheck(path, false, repoSettings);
-
-          const issueTitle = event.payload.issue.title;
-
-          const newFileName = extractFilePathWithArrow(issueTitle);
-          if (newFileName) {
-            await createNewFile(
-              newFileName,
-              repository,
-              installationAuthentication.token,
-              event.payload.issue,
-              path,
-              sourceMap,
-              repoSettings,
-            );
-            posthogClient.capture({
-              distinctId,
-              event: "New File Created",
-              properties: {
-                repo: repository.full_name,
-                file: newFileName,
-              },
-            });
-          } else {
-            await editFiles(
-              repository,
-              installationAuthentication.token,
-              event.payload.issue,
-              path,
-              sourceMap,
-              repoSettings,
-            );
-            posthogClient.capture({
-              distinctId,
-              event: "Files Edited",
-              properties: {
-                repo: repository.full_name,
-              },
-            });
-          }
-        } else if (prReview) {
-          if (!prBranch || !existingPr) {
-            throw new Error("prBranch and existingPr when handling prReview");
-          }
-          await respondToCodeReview(
-            repository,
-            installationAuthentication.token,
-            path,
-            repoSettings,
-            prBranch,
-            existingPr,
-            event.payload.review.state,
-            body,
-          );
-          posthogClient.capture({
-            distinctId,
-            event: "Code Review Responded",
-            properties: {
-              repo: repository.full_name,
-              pr: prBranch,
-            },
-          });
-        } else if (prCommand) {
-          if (!prBranch || !existingPr) {
-            throw new Error("prBranch and existingPr when handling prCommand");
-          }
-          switch (prCommand) {
-            case PRCommand.CreateStory:
-              await createStory(
-                repository,
-                installationAuthentication.token,
-                path,
-                prBranch,
-                repoSettings,
-                existingPr,
-              );
-              posthogClient.capture({
-                distinctId,
-                event: "Story Created",
-                properties: {
-                  repo: repository.full_name,
-                  pr: prBranch,
-                },
-              });
-              break;
-            case PRCommand.CodeReview:
-              await codeReview(
-                repository,
-                installationAuthentication.token,
-                path,
-                prBranch,
-                repoSettings,
-                existingPr,
-              );
-              posthogClient.capture({
-                distinctId,
-                event: "Code Review Started",
-                properties: {
-                  repo: repository.full_name,
-                  pr: prBranch,
-                },
-              });
-              break;
-            case PRCommand.FixError:
-              await fixError(
-                repository,
-                installationAuthentication.token,
-                eventName === "pull_request" ? null : event.payload.issue,
-                eventName === "pull_request"
-                  ? event.payload.pull_request.body
-                  : event.payload.comment.body,
-                path,
-                prBranch,
-                repoSettings,
-                existingPr,
-              );
-              posthogClient.capture({
-                distinctId,
-                event: "Error Fix Started",
-                properties: {
-                  repo: repository.full_name,
-                  pr: prBranch,
-                },
-              });
-              break;
-          }
-        } else if (issueComment) {
-          // NOTE: important tht we are handing issueComment ONLY after handling prCommand
-
-          // NOTE: The only command we support on issue comments is to run a build check
-          await runBuildCheck(path, false, repoSettings);
-          await addCommentToIssue(
-            repository,
-            eventIssueOrPRNumber,
-            installationAuthentication.token,
-            "Good news!\n\nThe build was successful! :tada:",
-          );
-        }
-      } finally {
-        console.log(
-          `[${repository.full_name}] cleaning up repo cloned to ${path}`,
+        const { path, cleanup } = await cloneRepo(
+          repository.full_name,
+          prBranch,
+          installationAuthentication.token,
         );
-        cleanup();
+
+        console.log(`[${repository.full_name}] repo cloned to ${path}`);
+        const repoSettings = getRepoSettings(path);
+
+        try {
+          if (issueOpened) {
+            const issueTitle = event.payload.issue.title;
+            const newFileName = extractFilePathWithArrow(issueTitle);
+
+            await publishInternalEventToQueue({
+              ...internalEventMetadata,
+              type: InternalEventType.Task,
+              payload: {
+                id: `task-${
+                  repository.full_name
+                }-${eventIssueOrPRNumber.toString()}`,
+                name: event.payload.issue.title,
+                type: newFileName
+                  ? TaskType.CREATE_NEW_FILE
+                  : TaskType.EDIT_FILES,
+                description: event.payload.issue.body,
+                storyPoints: 1, // TODO: calculate story points based on issue complexity
+                status: TaskStatus.IN_PROGRESS,
+              } as Task,
+            });
+
+            await publishInternalEventToQueue({
+              ...internalEventMetadata,
+              type: InternalEventType.Issue,
+              payload: {
+                id: `issue-${
+                  repository.full_name
+                }-${eventIssueOrPRNumber.toString()}`,
+                issueId: eventIssueOrPRNumber,
+                title: issueTitle,
+                description: event.payload.issue.body ?? "",
+                createdAt: event.payload.issue.created_at,
+                comments: [],
+                author: event.payload.issue.user.login,
+                assignee: event.payload.issue.assignee?.login ?? "",
+                status:
+                  event.payload.issue.state === "open" ? "open" : "closed",
+                link: event.payload.issue.html_url,
+              } as Issue,
+            });
+
+            // Ensure that we capture a source map BEFORE we run the build check.
+            // Once npm install has been run, the source map becomes much more
+            // detailed and is too large for our LLM context window.
+            const sourceMap = getSourceMap(path, repoSettings);
+            await runBuildCheck(path, false, repoSettings);
+
+            if (newFileName) {
+              await createNewFile(
+                newFileName,
+                repository,
+                installationAuthentication.token,
+                event.payload.issue,
+                path,
+                sourceMap,
+                repoSettings,
+              );
+              posthogClient.capture({
+                distinctId,
+                event: "New File Created",
+                properties: {
+                  repo: repository.full_name,
+                  file: newFileName,
+                },
+              });
+            } else {
+              await editFiles(
+                repository,
+                installationAuthentication.token,
+                event.payload.issue,
+                path,
+                sourceMap,
+                repoSettings,
+              );
+              posthogClient.capture({
+                distinctId,
+                event: "Files Edited",
+                properties: {
+                  repo: repository.full_name,
+                },
+              });
+            }
+          } else if (prReview) {
+            if (!prBranch || !existingPr) {
+              throw new Error("prBranch and existingPr when handling prReview");
+            }
+            await respondToCodeReview(
+              repository,
+              installationAuthentication.token,
+              path,
+              repoSettings,
+              prBranch,
+              existingPr,
+              event.payload.review.state,
+              body,
+            );
+            posthogClient.capture({
+              distinctId,
+              event: "Code Review Responded",
+              properties: {
+                repo: repository.full_name,
+                pr: prBranch,
+              },
+            });
+          } else if (prCommand) {
+            if (!prBranch || !existingPr) {
+              throw new Error(
+                "prBranch and existingPr when handling prCommand",
+              );
+            }
+            switch (prCommand) {
+              case PRCommand.CreateStory:
+                await createStory(
+                  repository,
+                  installationAuthentication.token,
+                  path,
+                  prBranch,
+                  repoSettings,
+                  existingPr,
+                );
+                posthogClient.capture({
+                  distinctId,
+                  event: "Story Created",
+                  properties: {
+                    repo: repository.full_name,
+                    pr: prBranch,
+                  },
+                });
+                break;
+              case PRCommand.CodeReview:
+                await codeReview(
+                  repository,
+                  installationAuthentication.token,
+                  path,
+                  prBranch,
+                  repoSettings,
+                  existingPr,
+                );
+                posthogClient.capture({
+                  distinctId,
+                  event: "Code Review Started",
+                  properties: {
+                    repo: repository.full_name,
+                    pr: prBranch,
+                  },
+                });
+                break;
+              case PRCommand.FixError:
+                await fixError(
+                  repository,
+                  installationAuthentication.token,
+                  eventName === "pull_request" ? null : event.payload.issue,
+                  eventName === "pull_request"
+                    ? event.payload.pull_request.body
+                    : event.payload.comment.body,
+                  path,
+                  prBranch,
+                  repoSettings,
+                  existingPr,
+                );
+                posthogClient.capture({
+                  distinctId,
+                  event: "Error Fix Started",
+                  properties: {
+                    repo: repository.full_name,
+                    pr: prBranch,
+                  },
+                });
+                break;
+            }
+          } else if (issueComment) {
+            // NOTE: important tht we are handing issueComment ONLY after handling prCommand
+
+            // NOTE: The only command we support on issue comments is to run a build check
+            await runBuildCheck(path, false, repoSettings);
+            await addCommentToIssue(
+              repository,
+              eventIssueOrPRNumber,
+              installationAuthentication.token,
+              "Good news!\n\nThe build was successful! :tada:",
+            );
+          }
+        } finally {
+          console.log(
+            `[${repository.full_name}] cleaning up repo cloned to ${path}`,
+          );
+          cleanup();
+        }
+      } catch (error) {
+        await addFailedWorkComment(
+          repository,
+          eventIssueOrPRNumber,
+          installationAuthentication.token,
+          issueOpened,
+          prReview,
+          error as Error,
+        );
+        posthogClient.capture({
+          distinctId,
+          event: "Work Failed",
+          properties: {
+            repo: repository.full_name,
+            branch: prBranch,
+            issue: eventIssueOrPRNumber,
+          },
+        });
       }
-    } catch (error) {
-      await addFailedWorkComment(
-        repository,
-        eventIssueOrPRNumber,
-        installationAuthentication.token,
-        issueOpened,
-        prReview,
-        error as Error,
-      );
-      posthogClient.capture({
-        distinctId,
-        event: "Work Failed",
-        properties: {
-          repo: repository.full_name,
-          branch: prBranch,
-          issue: eventIssueOrPRNumber,
-        },
-      });
-    }
+    });
   } else {
     console.error(
       `[${repository.full_name}] onGitHubEvent: ${event.id} ${eventName} : no installationId`,
@@ -609,7 +671,7 @@ export const publishGitHubEventToQueue = async (
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { octokit, ...eventWithoutOctokit } = event;
   channel?.sendToQueue(
-    QUEUE_NAME,
+    GITHUB_EVENT_QUEUE_NAME,
     Buffer.from(JSON.stringify(eventWithoutOctokit)),
     {
       persistent: true,
@@ -626,6 +688,172 @@ export const publishGitHubEventToQueue = async (
   );
 };
 
+// Internal Event Queue
+
+export enum InternalEventType {
+  Task = "Task",
+  Code = "Code",
+  Design = "Design",
+  Terminal = "Terminal",
+  Plan = "Plan",
+  Prompt = "Prompt",
+  Issue = "Issue",
+  PullRequest = "Pull Request",
+  Command = "Command",
+}
+
+export enum TaskStatus {
+  TODO = "todo",
+  IN_PROGRESS = "in_progress",
+  DONE = "done",
+}
+
+export enum TaskType {
+  CREATE_NEW_FILE = "Create New File",
+  EDIT_FILES = "Edit Files",
+  CODE_REVIEW = "Code Review",
+}
+
+export type Task = {
+  id: string;
+  name: string;
+  type: TaskType;
+  description: string;
+  storyPoints: number;
+  status: TaskStatus;
+};
+
+export type Command = {
+  command?: string;
+  response?: string;
+  directory?: string;
+};
+
+export type CodeFile = {
+  fileName: string;
+  filePath: string;
+  language: Language;
+  codeBlock: string;
+};
+
+export type Plan = {
+  id?: string;
+  title: string;
+  description: string;
+  position: number;
+  isComplete: boolean;
+};
+
+export type Comment = {
+  id: string;
+  commentId: number;
+  username: string;
+  createdAt: string;
+  content: string;
+};
+
+export type Issue = {
+  id: string;
+  issueId: number;
+  title: string;
+  description: string;
+  createdAt: string;
+  comments: Comment[];
+  author: string;
+  assignee: string;
+  status: "open" | "closed";
+  link: string;
+};
+
+export type PullRequest = {
+  id: string;
+  pullRequestId: number;
+  title: string;
+  description: string;
+  link: string;
+  status: "open" | "closed" | "merged";
+  createdAt: string;
+  author: string;
+  comments: Comment[];
+  changedFiles: number;
+  additions: number;
+  deletions: number;
+};
+
+export type Prompt = {
+  promptType: "User" | "System" | "Assistant";
+  prompt: string;
+  timestamp: string;
+};
+
+export type PromptDetails = {
+  metadata: {
+    timestamp: string;
+    cost: number;
+    tokens: number;
+    duration: number;
+    model: string;
+  };
+  request: {
+    prompts: Prompt[];
+  };
+  response: {
+    prompt: Prompt;
+  };
+};
+
+export type InternalEventMetadata = {
+  repo?: string;
+  issueId?: number | undefined;
+  userId?: string;
+};
+
+export type InternalEvent = {
+  id?: string;
+  type: InternalEventType;
+  pullRequestId?: number | undefined;
+  payload:
+    | Task
+    | Plan
+    | Issue
+    | PullRequest
+    | Command
+    | CodeFile
+    | PromptDetails;
+} & InternalEventMetadata;
+
+export const publishInternalEventToQueue = async (event: InternalEvent) => {
+  if (!INTERNAL_EVENT_BROADCAST_QUEUE_NAME) {
+    console.log("Internal event broadcast queue name not found");
+    return; // since the queue is optional, do not log an error here
+  }
+  if (!channel) {
+    console.error("Channel not initialized");
+    return;
+  }
+  if (!event.repo || !event.userId) {
+    console.error("Event repo or userId not found");
+    return;
+  }
+  // add a random id if one is not provided
+  if (!event.id) {
+    event.id = `${Math.random().toString(36).substring(7)}-${Date.now()}`;
+  }
+
+  channel?.sendToQueue(
+    INTERNAL_EVENT_BROADCAST_QUEUE_NAME,
+    Buffer.from(JSON.stringify(event)),
+    {
+      persistent: true,
+    },
+  );
+  console.log(
+    `[${event.repo}] publishInternalEventToQueue: ${event.id} ${event.type}`,
+  );
+};
+
 if (process.env.NODE_ENV !== "test") {
-  initRabbitMQ();
+  initRabbitMQ().then(() => {
+    console.log("RabbitMQ initialized");
+  });
 }

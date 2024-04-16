@@ -5,6 +5,14 @@ import path from "path";
 import { exec, ExecException } from "child_process";
 import { promisify } from "util";
 import { RepoSettings, Language, Style } from "./settings";
+import {
+  Command,
+  InternalEventMetadata,
+  InternalEventType,
+  publishInternalEventToQueue,
+} from "../messaging/queue";
+import { AsyncLocalStorage } from "async_hooks";
+const asyncLocalStorage = new AsyncLocalStorage();
 
 export { RepoSettings, getRepoSettings } from "./settings";
 
@@ -137,16 +145,54 @@ export interface ExecAsyncException extends ExecException {
   stdout: string;
   stderr: string;
 }
-
 export async function execAsyncWithLog(
   command: string,
   options: Parameters<typeof execAsync>[1],
 ) {
   const promise = execAsync(command, options);
+  const internalEventMetadata = getInternalEventMetadata();
 
-  promise.child.stdout?.on("data", (d) => process.stdout.write(d));
-  promise.child.stderr?.on("data", (d) => process.stderr.write(d));
-  promise.child.on("close", (code) => console.log(`*:EXIT:${code}`));
+  promise.child.stdout?.on("data", (d) => {
+    process.stdout.write(d);
+    // Publish an internal event for stdout
+    publishInternalEventToQueue({
+      ...internalEventMetadata,
+      type: InternalEventType.Command,
+      payload: {
+        command: command,
+        response: d.toString(),
+        directory: options?.cwd ?? "",
+      } as Command,
+    });
+  });
+
+  promise.child.stderr?.on("data", (d) => {
+    process.stderr.write(d);
+    // Publish an internal event for stderr
+    publishInternalEventToQueue({
+      ...internalEventMetadata,
+      type: InternalEventType.Command,
+      payload: {
+        command: command,
+        response: d.toString(),
+        directory: options?.cwd ?? "",
+      } as Command,
+    });
+  });
+
+  promise.child.on("close", (code) => {
+    console.log(`*:EXIT:${code}`);
+    // Publish an internal event for command exit
+    publishInternalEventToQueue({
+      ...internalEventMetadata,
+      type: InternalEventType.Command,
+      payload: {
+        command: command,
+        response: `*:EXIT:${code}`,
+        directory: options?.cwd ?? "",
+      } as Command,
+    });
+  });
 
   return promise;
 }
@@ -246,4 +292,26 @@ export async function getStyles(rootPath: string, repoSettings?: RepoSettings) {
   }
   // TODO: Add CSS styles
   return "";
+}
+
+export function getLanguageFromFileName(filePath: string): Language {
+  const extension = path.extname(filePath);
+  if (extension === ".ts" || extension === ".tsx") {
+    return Language.TypeScript;
+  }
+  return Language.JavaScript;
+}
+
+// use AsyncLocalStorage to get the internal event metadata such as repo name, user id, and issue/pr number
+export function getInternalEventMetadata() {
+  try {
+    const store = asyncLocalStorage.getStore() as {
+      internalEventMetadata?: InternalEventMetadata;
+    };
+    return store.internalEventMetadata;
+  } catch (error) {
+    console.log("Error getting internal event metadata", error);
+    return {};
+    // throw new Error("Internal event metadata not found");
+  }
 }

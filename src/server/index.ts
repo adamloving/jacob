@@ -31,6 +31,8 @@ app.post(
 );
 setupGitHubWebhook(app);
 
+console.log("published test event");
+
 if (!process.env["VITE"]) {
   const frontendFiles = process.cwd() + "/dist";
   app.use(express.static(frontendFiles));

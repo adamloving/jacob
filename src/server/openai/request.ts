@@ -7,7 +7,16 @@ import {
   ZodSchema,
 } from "zod";
 import { parse } from "jsonc-parser";
-import { parseTemplate, removeMarkdownCodeblocks } from "../utils";
+import {
+  getInternalEventMetadata,
+  parseTemplate,
+  removeMarkdownCodeblocks,
+} from "../utils";
+import {
+  InternalEventType,
+  PromptDetails,
+  publishInternalEventToQueue,
+} from "../messaging/queue";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -22,15 +31,23 @@ const openai = new OpenAI({
 
 const CONTEXT_WINDOW = {
   "gpt-4-0613": 8192,
-  "gpt-4-vision-preview": 128000,
-  "gpt-4-turbo-preview": 128000,
+  "gpt-4-turbo": 128000,
 };
 
 // Note that gpt-4-turbo-preview has a max_tokens limit of 4K, despite having a context window of 128K
 const MAX_OUTPUT = {
   "gpt-4-0613": 8192,
-  "gpt-4-vision-preview": 4096,
-  "gpt-4-turbo-preview": 4096,
+  "gpt-4-turbo": 4096,
+};
+
+const ONE_MILLION = 1000000;
+const INPUT_TOKEN_COSTS = {
+  "gpt-4-0613": 30 / ONE_MILLION,
+  "gpt-4-turbo": 10 / ONE_MILLION,
+};
+const OUTPUT_TOKEN_COSTS = {
+  "gpt-4-0613": 60 / ONE_MILLION,
+  "gpt-4-turbo": 30 / ONE_MILLION,
 };
 
 type Model = keyof typeof CONTEXT_WINDOW;
@@ -70,7 +87,7 @@ export const sendGptRequest = async (
   retries = 10,
   delay = 60000, // rate limit is 40K tokens per minute, so by default start with 60 seconds
   imagePrompt: OpenAI.Chat.ChatCompletionMessageParam | null = null,
-  model: Model = "gpt-4-turbo-preview",
+  model: Model = "gpt-4-turbo",
 ): Promise<string | null> => {
   console.log("\n\n --- User Prompt --- \n\n", userPrompt);
   console.log("\n\n --- System Prompt --- \n\n", systemPrompt);
@@ -99,9 +116,48 @@ export const sendGptRequest = async (
       temperature,
     });
     const endTime = Date.now();
-    console.log(`\n +++ ${model} Response time ${endTime - startTime} ms`);
+    const duration = endTime - startTime;
+    console.log(`\n +++ ${model} Response time ${duration} ms`);
 
     const gptResponse = response.choices[0].message;
+
+    const inputTokens = response.usage?.prompt_tokens ?? 0;
+    const outputTokens = response.usage?.completion_tokens ?? 0;
+    const tokens = inputTokens + outputTokens;
+    const cost =
+      inputTokens * INPUT_TOKEN_COSTS[model] +
+      outputTokens * OUTPUT_TOKEN_COSTS[model];
+    const timestamp = new Date().toISOString();
+    // send an internal event to track the prompts, timestamp, cost, tokens, and other data
+    const internalEventMetadata = getInternalEventMetadata();
+    publishInternalEventToQueue({
+      ...internalEventMetadata,
+      type: InternalEventType.Prompt,
+      payload: {
+        metadata: {
+          timestamp,
+          cost,
+          tokens,
+          duration,
+          model,
+        },
+        request: {
+          prompts: messages.map((message) => ({
+            promptType: message.role as "User" | "System" | "Assistant",
+            prompt: message.content,
+            timestamp,
+          })),
+        },
+        response: {
+          prompt: {
+            promptType: "Assistant",
+            prompt: gptResponse.content,
+            timestamp,
+          },
+        },
+      } as PromptDetails,
+    });
+
     return gptResponse.content;
   } catch (error) {
     if (
@@ -223,11 +279,9 @@ export const sendGptVisionRequest = async (
   retries = 10,
   delay = 60000,
 ): Promise<string | null> => {
-  let model: Model = "gpt-4-turbo-preview";
+  const model: Model = "gpt-4-turbo";
   let imagePrompt = null;
   if (snapshotUrl?.length > 0) {
-    model = "gpt-4-vision-preview";
-
     const prompt = parseTemplate("dev", "vision", "user", {});
 
     imagePrompt = {

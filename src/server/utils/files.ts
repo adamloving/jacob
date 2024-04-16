@@ -2,7 +2,16 @@ import fs from "fs";
 import path from "path";
 import ignore, { Ignore } from "ignore";
 import parseDiff from "parse-diff";
-import { removeMarkdownCodeblocks } from ".";
+import {
+  getInternalEventMetadata,
+  getLanguageFromFileName,
+  removeMarkdownCodeblocks,
+} from ".";
+import {
+  CodeFile,
+  InternalEventType,
+  publishInternalEventToQueue,
+} from "../messaging/queue";
 
 type LineLengthMap = Record<string, number>;
 
@@ -140,6 +149,20 @@ export const reconstructFiles = (
     // if the code is wrapped in a code block, remove the code block
     fileContent = removeMarkdownCodeblocks(fileContent);
     fs.writeFileSync(targetPath, fileContent);
+
+    // publish the file to the queue
+    const language = getLanguageFromFileName(filePath);
+    const internalEventMetadata = getInternalEventMetadata();
+    publishInternalEventToQueue({
+      ...internalEventMetadata,
+      type: InternalEventType.Code,
+      payload: {
+        fileName: filePath,
+        filePath: targetPath,
+        language: language,
+        codeBlock: fileContent,
+      } as CodeFile,
+    });
   }
 };
 
@@ -199,6 +222,20 @@ export const saveNewFile = (
   const targetPath = path.join(rootDir, filePath);
   fs.mkdirSync(path.dirname(targetPath), { recursive: true });
   fs.writeFileSync(targetPath, fileContent);
+
+  // publish the file to the queue
+  const language = getLanguageFromFileName(filePath);
+  const internalEventMetadata = getInternalEventMetadata();
+  publishInternalEventToQueue({
+    ...internalEventMetadata,
+    type: InternalEventType.Code,
+    payload: {
+      fileName: filePath,
+      filePath: targetPath,
+      language: language,
+      codeBlock: fileContent,
+    } as CodeFile,
+  });
 };
 
 export function getNewOrModifiedRangesMapFromDiff(diff: string) {

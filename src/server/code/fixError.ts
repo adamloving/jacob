@@ -56,6 +56,7 @@ export async function fixError(
 
   const sourceMap =
     getSourceMap(rootPath, repoSettings) || (await traverseCodebase(rootPath));
+
   const assessment = await assessBuildError({ sourceMap, errors });
   console.log(`[${repository.full_name}] Assessment of Error:`, assessment);
 

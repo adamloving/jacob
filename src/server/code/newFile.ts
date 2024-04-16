@@ -10,12 +10,19 @@ import {
   RepoSettings,
   getSnapshotUrl,
   getStyles,
+  getInternalEventMetadata,
 } from "../utils";
 import { sendGptVisionRequest } from "../openai/request";
 import { setNewBranch } from "../git/branch";
 import { checkAndCommit } from "./checkAndCommit";
-import { saveNewFile } from "../utils/files";
 import { saveImages } from "../utils/images";
+import {
+  CodeFile,
+  InternalEventType,
+  publishInternalEventToQueue,
+} from "../messaging/queue";
+import { saveNewFile } from "../utils/files";
+import { Language } from "../utils/settings";
 
 export async function createNewFile(
   newFileName: string,
@@ -108,6 +115,18 @@ export async function createNewFile(
   await setNewBranch(rootPath, newBranch);
 
   saveNewFile(rootPath, newFileName, code);
+
+  const internalEventMetadata = getInternalEventMetadata();
+  publishInternalEventToQueue({
+    ...internalEventMetadata,
+    type: InternalEventType.Code,
+    payload: {
+      fileName: newFileName,
+      filePath: path.join(rootPath, newFileName),
+      codeBlock: code,
+      language: repoSettings?.language ?? Language.TypeScript,
+    } as CodeFile,
+  });
 
   await checkAndCommit({
     repository,
