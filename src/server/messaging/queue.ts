@@ -34,8 +34,7 @@ import { createRepoInstalledIssue } from "../github/issue";
 import { getFile } from "../github/repo";
 import { posthogClient } from "../analytics/posthog";
 import { Language } from "../utils/settings";
-import { AsyncLocalStorage } from "async_hooks";
-const asyncLocalStorage = new AsyncLocalStorage();
+import { asyncLocalStorage } from "../utils/localStorage";
 
 const GITHUB_EVENT_QUEUE_NAME = "github_event_queue";
 const INTERNAL_EVENT_BROADCAST_QUEUE_NAME =

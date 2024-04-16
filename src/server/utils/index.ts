@@ -11,8 +11,7 @@ import {
   InternalEventType,
   publishInternalEventToQueue,
 } from "../messaging/queue";
-import { AsyncLocalStorage } from "async_hooks";
-const asyncLocalStorage = new AsyncLocalStorage();
+import { asyncLocalStorage } from "./localStorage";
 
 export { RepoSettings, getRepoSettings } from "./settings";
 
@@ -308,7 +307,7 @@ export function getInternalEventMetadata() {
     const store = asyncLocalStorage.getStore() as {
       internalEventMetadata?: InternalEventMetadata;
     };
-    return store.internalEventMetadata;
+    return store;
   } catch (error) {
     console.log("Error getting internal event metadata", error);
     return {};
