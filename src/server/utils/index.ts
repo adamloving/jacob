@@ -151,32 +151,17 @@ export async function execAsyncWithLog(
   const promise = execAsync(command, options);
   const internalEventMetadata = getInternalEventMetadata();
 
+  let response = "";
+
   promise.child.stdout?.on("data", (d) => {
     process.stdout.write(d);
-    // Publish an internal event for stdout
-    publishInternalEventToQueue({
-      ...internalEventMetadata,
-      type: InternalEventType.Command,
-      payload: {
-        command: command,
-        response: d.toString(),
-        directory: options?.cwd ?? "",
-      } as Command,
-    });
+    response += d.toString();
   });
 
   promise.child.stderr?.on("data", (d) => {
     process.stderr.write(d);
-    // Publish an internal event for stderr
-    publishInternalEventToQueue({
-      ...internalEventMetadata,
-      type: InternalEventType.Command,
-      payload: {
-        command: command,
-        response: d.toString(),
-        directory: options?.cwd ?? "",
-      } as Command,
-    });
+    // TODO: wrap this in a token to indicate that it is an error
+    response += d.toString();
   });
 
   promise.child.on("close", (code) => {
@@ -186,8 +171,8 @@ export async function execAsyncWithLog(
       ...internalEventMetadata,
       type: InternalEventType.Command,
       payload: {
-        command: command,
-        response: `*:EXIT:${code}`,
+        command,
+        response,
         directory: options?.cwd ?? "",
       } as Command,
     });
@@ -302,15 +287,15 @@ export function getLanguageFromFileName(filePath: string): Language {
 }
 
 // use AsyncLocalStorage to get the internal event metadata such as repo name, user id, and issue/pr number
-export function getInternalEventMetadata() {
+export function getInternalEventMetadata(): InternalEventMetadata | object {
   try {
     const store = asyncLocalStorage.getStore() as {
-      internalEventMetadata?: InternalEventMetadata;
+      internalEventMetadata: InternalEventMetadata;
     };
-    return store;
+    return store?.internalEventMetadata ?? {};
   } catch (error) {
-    console.log("Error getting internal event metadata", error);
-    return {};
-    // throw new Error("Internal event metadata not found");
+    throw new Error(
+      `Error getting internal event metadata from AsyncLocalStorage: ${error}`,
+    );
   }
 }

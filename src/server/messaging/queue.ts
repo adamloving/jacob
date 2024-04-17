@@ -364,7 +364,7 @@ export async function onGitHubEvent(event: WebhookQueuedEvent) {
       userId: distinctId,
     };
     // save the internal event metadata to asyncLocalStorage
-    await asyncLocalStorage.run(internalEventMetadata, async () => {
+    await asyncLocalStorage.run({ internalEventMetadata }, async () => {
       try {
         const { path, cleanup } = await cloneRepo(
           repository.full_name,
@@ -380,7 +380,7 @@ export async function onGitHubEvent(event: WebhookQueuedEvent) {
             const issueTitle = event.payload.issue.title;
             const newFileName = extractFilePathWithArrow(issueTitle);
 
-            await publishInternalEventToQueue({
+            publishInternalEventToQueue({
               ...internalEventMetadata,
               type: InternalEventType.Task,
               payload: {
@@ -397,7 +397,13 @@ export async function onGitHubEvent(event: WebhookQueuedEvent) {
               } as Task,
             });
 
-            await publishInternalEventToQueue({
+            // Ensure that we capture a source map BEFORE we run the build check.
+            // Once npm install has been run, the source map becomes much more
+            // detailed and is too large for our LLM context window.
+            const sourceMap = getSourceMap(path, repoSettings);
+            await runBuildCheck(path, false, repoSettings);
+
+            publishInternalEventToQueue({
               ...internalEventMetadata,
               type: InternalEventType.Issue,
               payload: {
@@ -416,12 +422,6 @@ export async function onGitHubEvent(event: WebhookQueuedEvent) {
                 link: event.payload.issue.html_url,
               } as Issue,
             });
-
-            // Ensure that we capture a source map BEFORE we run the build check.
-            // Once npm install has been run, the source map becomes much more
-            // detailed and is too large for our LLM context window.
-            const sourceMap = getSourceMap(path, repoSettings);
-            await runBuildCheck(path, false, repoSettings);
 
             if (newFileName) {
               await createNewFile(
@@ -821,7 +821,7 @@ export type InternalEvent = {
     | PromptDetails;
 } & InternalEventMetadata;
 
-export const publishInternalEventToQueue = async (event: InternalEvent) => {
+export const publishInternalEventToQueue = (event: InternalEvent) => {
   if (!INTERNAL_EVENT_BROADCAST_QUEUE_NAME) {
     console.log("Internal event broadcast queue name not found");
     return; // since the queue is optional, do not log an error here

@@ -7,6 +7,13 @@ import { MarkPullRequestReadyForReviewPayload } from "@octokit/graphql-schema";
 import path from "path";
 
 import { concatenateFiles, type FilesRangesMap } from "../utils/files";
+import { getInternalEventMetadata } from "../utils";
+import {
+  InternalEventMetadata,
+  InternalEventType,
+  PullRequest,
+  publishInternalEventToQueue,
+} from "../messaging/queue";
 
 export type PREvent =
   RestEndpointMethodTypes["pulls"]["createReview"]["parameters"]["event"];
@@ -56,6 +63,28 @@ export async function createPR(
       draft,
     });
     console.log("Pull request created:", result.data.html_url);
+    const internalEventMetadata =
+      getInternalEventMetadata() as InternalEventMetadata;
+    publishInternalEventToQueue({
+      ...internalEventMetadata,
+      type: InternalEventType.PullRequest,
+      payload: {
+        id: `pr-${internalEventMetadata?.repo ?? repository.full_name}-${
+          internalEventMetadata?.issueId ?? result.data.number
+        }`,
+        pullRequestId: result.data.number,
+        title,
+        description: body,
+        link: result.data.html_url,
+        status: "open",
+        createdAt: result.data.created_at,
+        author: repository.owner.login,
+        comments: [],
+        changedFiles: 0,
+        additions: 0,
+        deletions: 0,
+      } as PullRequest,
+    });
   } catch (error) {
     if (isErrorWithStatus(error) && error.status === 422) {
       // If a 422 error is caught, the user does not have draft PRs enabled. Try again with draft set to false.

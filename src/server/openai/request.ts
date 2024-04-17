@@ -143,8 +143,13 @@ export const sendGptRequest = async (
         },
         request: {
           prompts: messages.map((message) => ({
-            promptType: message.role as "User" | "System" | "Assistant",
-            prompt: message.content,
+            promptType:
+              message.role?.toUpperCase() ??
+              ("User" as "User" | "System" | "Assistant"),
+            prompt:
+              typeof message.content === "string"
+                ? message.content
+                : JSON.stringify(message.content),
             timestamp,
           })),
         },
