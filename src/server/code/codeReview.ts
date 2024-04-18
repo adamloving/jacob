@@ -3,7 +3,11 @@ import { Repository } from "@octokit/webhooks-types";
 import { Endpoints } from "@octokit/types";
 
 import { getSourceMap, getTypes } from "../analyze/sourceMap";
-import { parseTemplate, RepoSettings } from "../utils";
+import {
+  getIssueNumberFromBranch,
+  parseTemplate,
+  RepoSettings,
+} from "../utils";
 import { sendGptRequest } from "../openai/request";
 import { getIssue } from "../github/issue";
 import { concatenatePRFiles, createPRReview, getPRDiff } from "../github/pr";
@@ -26,9 +30,7 @@ export async function codeReview(
   repoSettings: RepoSettings | undefined,
   existingPr: PullRequest,
 ) {
-  const regex = /jacob-issue-(\d+)-.*/;
-  const match = branch.match(regex);
-  const issueNumber = parseInt(match?.[1] ?? "", 10);
+  const issueNumber = getIssueNumberFromBranch(branch);
   let issue: Issue | undefined;
   try {
     const result = await getIssue(repository, token, issueNumber);

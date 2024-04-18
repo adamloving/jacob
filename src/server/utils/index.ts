@@ -309,3 +309,9 @@ export function getInternalEventMetadata(): InternalEventMetadata | object {
     );
   }
 }
+
+export function getIssueNumberFromBranch(branch: string): number {
+  const regex = /jacob-issue-(\d+)-.*/;
+  const match = branch.match(regex);
+  return parseInt(match?.[1] ?? "", 10);
+}

@@ -25,6 +25,7 @@ import {
   PR_COMMAND_VALUES,
   enumFromStringValue,
   getRepoSettings,
+  getIssueNumberFromBranch,
 } from "../utils";
 import {
   addFailedWorkComment,
@@ -349,6 +350,7 @@ export async function onGitHubEvent(event: WebhookQueuedEvent) {
 
     let existingPr: Awaited<ReturnType<typeof getPR>>["data"] | undefined;
     let prBranch: string | undefined;
+    let issueNumberForPr: number | undefined;
     if (prComment || prReview || prOpened) {
       const result = await getPR(
         repository,
@@ -357,10 +359,33 @@ export async function onGitHubEvent(event: WebhookQueuedEvent) {
       );
       existingPr = result.data;
       prBranch = existingPr.head.ref;
+
+      issueNumberForPr = getIssueNumberFromBranch(prBranch);
+
+      publishInternalEventToQueue({
+        repo: repository.full_name,
+        issueId: issueNumberForPr ?? eventIssueOrPRNumber,
+        userId: distinctId,
+        type: InternalEventType.PullRequest,
+        payload: {
+          id: `pr-${repository.full_name}-${issueNumberForPr.toString()}`,
+          pullRequestId: eventIssueOrPRNumber,
+          title: existingPr.title,
+          description: existingPr.body ?? "",
+          link: existingPr.html_url,
+          status: existingPr.state,
+          createdAt: existingPr.created_at,
+          author: existingPr.user.login,
+          comments: [],
+          changedFiles: existingPr.changed_files,
+          additions: existingPr.additions,
+          deletions: existingPr.deletions,
+        } as PullRequest,
+      });
     }
     const internalEventMetadata: InternalEventMetadata = {
       repo: repository.full_name,
-      issueId: eventIssueOrPRNumber,
+      issueId: issueNumberForPr ?? eventIssueOrPRNumber,
       userId: distinctId,
     };
     // save the internal event metadata to asyncLocalStorage

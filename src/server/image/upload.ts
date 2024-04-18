@@ -7,6 +7,7 @@ import {
 } from "../utils/images";
 
 const bucketName = process.env.BUCKET_NAME || "";
+const ONE_WEEK_IN_SECONDS = 7 * 24 * 60 * 60;
 
 export async function uploadImage(req: Request, res: Response) {
   try {
@@ -36,7 +37,7 @@ export async function uploadImage(req: Request, res: Response) {
       bucketName,
       imageName,
     );
-    const url = getSignedUrl(imagePath, bucketName);
+    const url = getSignedUrl(imagePath, bucketName, ONE_WEEK_IN_SECONDS);
     return res.status(200).json({ success: true, url });
   } catch (error) {
     console.log("Error uploading image", error);

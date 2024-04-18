@@ -7,9 +7,22 @@ import path from "path";
 import { addCommitAndPush } from "../git/commit";
 import { addCommentToIssue } from "../github/issue";
 import { runBuildCheck } from "../build/node/check";
-import { extractFilePathWithArrow, PRCommand, RepoSettings } from "../utils";
+import {
+  extractFilePathWithArrow,
+  getInternalEventMetadata,
+  getIssueNumberFromBranch,
+  PRCommand,
+  RepoSettings,
+} from "../utils";
 import { createPR, markPRReadyForReview } from "../github/pr";
 import { getIssue } from "../github/issue";
+import {
+  InternalEventType,
+  publishInternalEventToQueue,
+  Task,
+  TaskStatus,
+  TaskType,
+} from "../messaging/queue";
 
 export type PullRequest =
   Endpoints["GET /repos/{owner}/{repo}/pulls/{pull_number}"]["response"]["data"];
@@ -268,5 +281,19 @@ export async function checkAndCommit({
 
       await addCommentToIssue(repository, issue.number, token, issueMessage);
     }
+    const internalEventMetadata = getInternalEventMetadata();
+    const issueNumber = issue?.number ?? getIssueNumberFromBranch(branch);
+    publishInternalEventToQueue({
+      ...internalEventMetadata,
+      type: InternalEventType.Task,
+      payload: {
+        id: `task-${repository.full_name}-${issueNumber.toString()}`,
+        name: issue?.title ?? prTitle,
+        type: newFileName ? TaskType.CREATE_NEW_FILE : TaskType.EDIT_FILES,
+        description: issue?.body ?? newPrBody,
+        storyPoints: 1, // TODO: calculate story points based on issue complexity
+        status: TaskStatus.DONE,
+      } as Task,
+    });
   }
 }
