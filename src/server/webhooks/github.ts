@@ -65,6 +65,25 @@ ghApp.webhooks.on("issues.opened", async (event) => {
   }
 });
 
+// add a new webhook event handler that is similar to the issues.opened but for issues.edited
+ghApp.webhooks.on("issues.edited", async (event) => {
+  const { payload } = event;
+  const { repository } = payload;
+  console.log(
+    `[${repository.full_name}] Received issue #${payload.issue.number} edited event`,
+  );
+  if (payload?.issue.body?.includes("@jacob-ai-bot")) {
+    console.log(
+      `[${repository.full_name}] Issue #${payload.issue.number} contains @jacob-ai-bot mention`,
+    );
+    publishGitHubEventToQueue(event);
+  } else {
+    console.log(
+      `[${repository.full_name}] Issue #${payload.issue.number} has no @jacob-ai-bot mention`,
+    );
+  }
+});
+
 // add a new webhook event handler for when an issue is labeled
 // ghApp.webhooks.on("issues.labeled", async (event) => {
 //   const { payload } = event;
@@ -75,18 +94,6 @@ ghApp.webhooks.on("issues.opened", async (event) => {
 //     publishGitHubEventToQueue(event);
 //   } else {
 //     console.log(`Received issue #${payload.issue.number} without label "jacob"`);
-//   }
-// });
-
-// add a new webhook event handler for when an issue is edited
-// ghApp.webhooks.on("issues.edited", async (event) => {
-//   const { payload } = event;
-//   console.log(`Received issue #${payload.issue.number} edited event`);
-//   if (payload?.issue.body?.includes("@jacob-ai-bot")) {
-//     console.log(`Issue #${payload.issue.number} contains @jacob-ai-bot mention`);
-//     publishGitHubEventToQueue(event);
-//   } else {
-//     console.log(`Issue #${payload.issue.number} has no @jacob-ai-bot mention`);
 //   }
 // });
 

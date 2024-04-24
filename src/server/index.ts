@@ -7,7 +7,11 @@ import {
 } from "./auth/authToken";
 import { newIssueForFigmaFile } from "./design/figma";
 import { getRepos } from "./api/repos";
-import { getExtractedIssues } from "./api/issues";
+import {
+  getExtractedIssues,
+  updateGithubIssue,
+  createGithubIssue,
+} from "./api/issues";
 import { uploadImage } from "./image/upload";
 import express from "express";
 import cors from "cors";
@@ -24,6 +28,8 @@ app.get("/api/auth/accessToken/:readKey", getAccessToken);
 app.post("/api/auth/accessToken/:writeKey", express.json(), postAccessToken);
 app.get("/api/repos", cors(), express.json(), getRepos);
 app.get("/api/extractedIssues", cors(), express.json(), getExtractedIssues);
+app.post("/api/updateIssue", cors(), express.json(), updateGithubIssue);
+app.put("/api/createIssue", cors(), express.json(), createGithubIssue);
 app.options("/api/design/:verb", cors());
 app.post("/api/design/:verb", cors(), express.json(), newIssueForFigmaFile);
 app.options("/api/image/upload", cors());
