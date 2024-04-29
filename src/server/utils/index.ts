@@ -167,6 +167,17 @@ export async function execAsyncWithLog(
   promise.child.on("close", (code) => {
     console.log(`*:EXIT:${code}`);
     // Publish an internal event for command exit
+    // redact the 'x-access-token' from the command and response
+    const tokens = ["x-access-token", "ghs_", "ghp_"];
+    if (
+      !tokens.some(
+        (token) => command.includes(token) || response.includes(token),
+      )
+    ) {
+      // redact the token from the command and response
+      command = command.replace(/x-access-token:[^@]+@/g, "");
+      response = response.replace(/x-access-token:[^@]+@/g, "");
+    }
     publishInternalEventToQueue({
       ...internalEventMetadata,
       type: InternalEventType.Command,
